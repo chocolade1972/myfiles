@@ -1,0 +1,455 @@
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace Screen_Recorder
+{
+    public partial class CustomCursorForm : Form
+    {
+        private const int CursorDiameter = 32; // Cursor circle size
+        private Timer timer;
+        private bool mouseDown = true;
+        private NotifyIcon notifyIcon;
+
+        // NEW: Reference to the radial menu form
+        private RadialMenuForm radialMenu;
+
+        public CustomCursorForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+
+            // Make the form completely invisible and layered
+            SetStyle(ControlStyles.Opaque, true);
+            Width = CursorDiameter;
+            Height = CursorDiameter;
+
+            // Set layered and transparent styles
+            int exStyle = GetWindowLong(this.Handle, GWL_EXSTYLE);
+            exStyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT;
+            SetWindowLong(this.Handle, GWL_EXSTYLE, exStyle);
+
+            // Hide the real cursor
+            Cursor.Hide();
+
+            timer = new Timer { Interval = 10, Enabled = true };
+            timer.Tick += (s, e) => UpdateCursorLocation();
+
+            // NEW: Global mouse hook for middle button events
+            StartMouseHook();
+
+            notifyIcon = new NotifyIcon
+            {
+                Visible = true,
+                Icon = SystemIcons.Information, // Or load your own .ico
+                BalloonTipIcon = ToolTipIcon.Info
+            };
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            Focus();
+            Capture = true;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            // Nothing: all drawing is done with UpdateLayeredWindow
+        }
+
+        private void UpdateCursorLocation()
+        {
+            var p = Cursor.Position;
+            int x = p.X - CursorDiameter / 2;
+            int y = p.Y - CursorDiameter / 2;
+            DrawCircleOverlay(x, y);
+        }
+
+        private void DrawCircleOverlay(int x, int y)
+        {
+            using (Bitmap bmp = new Bitmap(CursorDiameter, CursorDiameter, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+
+                // Draw filled circle
+                using (Brush fillBrush = new SolidBrush(Color.FromArgb(160, Color.Red))) // semi-transparent
+                {
+                    g.FillEllipse(fillBrush, 1, 1, CursorDiameter - 2, CursorDiameter - 2);
+                }
+
+                // Draw smooth black outline
+                using (Pen outlinePen = new Pen(Color.Black, 2f))
+                {
+                    g.DrawEllipse(outlinePen, 1, 1, CursorDiameter - 2, CursorDiameter - 2);
+                }
+
+                // Push bitmap to desktop using UpdateLayeredWindow
+                SetBitmap(bmp, x, y);
+            }
+        }
+
+        private void SetBitmap(Bitmap bitmap, int x, int y)
+        {
+            IntPtr screenDC = GetDC(IntPtr.Zero);
+            IntPtr memDC = CreateCompatibleDC(screenDC);
+            IntPtr hBitmap = bitmap.GetHbitmap(Color.FromArgb(0)); // create GDI bitmap handle
+            IntPtr oldBitmap = SelectObject(memDC, hBitmap);
+
+            SIZE size = new SIZE(bitmap.Width, bitmap.Height);
+            POINT pointSource = new POINT(0, 0);
+            POINT topPos = new POINT(x, y);
+
+            BLENDFUNCTION blend = new BLENDFUNCTION
+            {
+                BlendOp = AC_SRC_OVER,
+                BlendFlags = 0,
+                SourceConstantAlpha = 255, // use alpha from bitmap
+                AlphaFormat = AC_SRC_ALPHA
+            };
+
+            UpdateLayeredWindow(this.Handle, screenDC, ref topPos, ref size, memDC, ref pointSource, 0, ref blend, ULW_ALPHA);
+
+            // Cleanup
+            SelectObject(memDC, oldBitmap);
+            DeleteObject(hBitmap);
+            DeleteDC(memDC);
+            ReleaseDC(IntPtr.Zero, screenDC);
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                const int WS_EX_NOACTIVATE = 0x08000000;
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+                return cp;
+            }
+        }
+
+        //protected override bool ShowWithoutActivation => true;
+
+        // Make window click-through (no mouse interaction)
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_NCHITTEST = 0x84;
+            const int HTTRANSPARENT = -1;
+            if (m.Msg == WM_NCHITTEST)
+            {
+                m.Result = (IntPtr)HTTRANSPARENT;
+                return;
+            }
+            base.WndProc(ref m);
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == Keys.Escape)
+            {
+                Application.Exit();
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && timer != null)
+                timer.Dispose();
+            StopMouseHook();
+            base.Dispose(disposing);
+        }
+
+        #region Win32 Interop
+
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_LAYERED = 0x80000;
+        private const int WS_EX_TRANSPARENT = 0x20;
+        private const int ULW_ALPHA = 0x2;
+        private const byte AC_SRC_OVER = 0x00;
+        private const byte AC_SRC_ALPHA = 0x01;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT
+        {
+            public int X;
+            public int Y;
+            public POINT(int x, int y) { X = x; Y = y; }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SIZE
+        {
+            public int cx;
+            public int cy;
+            public SIZE(int cx, int cy) { this.cx = cx; this.cy = cy; }
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private struct BLENDFUNCTION
+        {
+            public byte BlendOp;
+            public byte BlendFlags;
+            public byte SourceConstantAlpha;
+            public byte AlphaFormat;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst,
+            ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern bool DeleteDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern bool DeleteObject(IntPtr hObject);
+
+        // NEW: Mouse hook interop
+        private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+        private LowLevelMouseProc mouseProc;
+        private IntPtr mouseHookId = IntPtr.Zero;
+
+        private const int WH_MOUSE_LL = 14;
+        private const int WM_MBUTTONDOWN = 0x0207;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSLLHOOKSTRUCT
+        {
+            public POINT pt;
+            public uint mouseData;
+            public uint flags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        private void StartMouseHook()
+        {
+            if (mouseProc == null)
+                mouseProc = MouseHookCallback;
+            mouseHookId = SetWindowsHookEx(WH_MOUSE_LL, mouseProc, GetModuleHandle(null), 0);
+        }
+
+        private void StopMouseHook()
+        {
+            if (mouseHookId != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(mouseHookId);
+                mouseHookId = IntPtr.Zero;
+            }
+        }
+
+        private bool isRadialMenuOpen = false;
+
+        private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && wParam == (IntPtr)WM_MBUTTONDOWN)
+            {
+                if (!isRadialMenuOpen)
+                {
+                    ShowRadialMenu();
+                    isRadialMenuOpen = true;
+                }
+                else
+                {
+                    HideRadialMenu();
+                    isRadialMenuOpen = false;
+                }
+            }
+            return CallNextHookEx(mouseHookId, nCode, wParam, lParam);
+        }
+
+        private void HideRadialMenu()
+        {
+            if (radialMenu != null && !radialMenu.IsDisposed)
+            {
+                radialMenu.Close();
+                radialMenu = null;
+            }
+        }
+
+        #endregion
+
+        // NEW: Show the radial menu form
+        private void ShowRadialMenu()
+        {
+            if (radialMenu != null && !radialMenu.IsDisposed)
+            {
+                radialMenu.Close();
+                radialMenu = null;
+            }
+
+            Rectangle scr = Screen.PrimaryScreen.Bounds;
+            int menuSize = 300;
+            int x = scr.Left + (scr.Width - menuSize) / 2;
+            int y = scr.Top + (scr.Height - menuSize) / 2;
+
+            radialMenu = new RadialMenuForm();
+            radialMenu.StartPosition = FormStartPosition.Manual;
+            radialMenu.Size = new Size(menuSize, menuSize);
+            radialMenu.Location = new Point(x, y);
+
+            radialMenu.OptionSelected += (option) =>
+            {
+                notifyIcon.BalloonTipTitle = "Option Selected";
+                notifyIcon.BalloonTipText = $"You selected: {option}";
+                notifyIcon.ShowBalloonTip(2000);
+            };
+
+            radialMenu.Show();
+            radialMenu.Activate();
+        }
+    }
+
+    // NEW: RadialMenuForm class
+    public class RadialMenuForm : Form
+    {
+        private readonly string[] options = { "Radius", "Fill", "Option 3", "Option 4", "Option 5", "Option 6" };
+        private readonly Color[] colors = { Color.Orange, Color.DeepSkyBlue, Color.LimeGreen, Color.MediumVioletRed, Color.Gold, Color.MediumSlateBlue };
+        private int hoveredIndex = -1;
+        public event Action<string> OptionSelected;
+
+        public RadialMenuForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            BackColor = Color.Magenta;
+            TransparencyKey = Color.Magenta;
+            DoubleBuffered = true;
+            Size = new Size(300, 300);
+
+            // Close on click outside or ESC key
+            //Deactivate += (s, e) => Close();
+        }
+
+        protected override bool ShowWithoutActivation => true;
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            int radius = Math.Min(ClientSize.Width, ClientSize.Height) / 2 - 10;
+            Point center = new Point(ClientSize.Width / 2, ClientSize.Height / 2);
+            float anglePerOption = 360f / options.Length;
+            float startAngle = -90f - anglePerOption / 2;
+
+            for (int i = 0; i < options.Length; i++)
+            {
+                using (Brush b = new SolidBrush(i == hoveredIndex ? ControlPaint.Light(colors[i], 0.4f) : colors[i]))
+                {
+                    e.Graphics.FillPie(b, center.X - radius, center.Y - radius, radius * 2, radius * 2, startAngle + i * anglePerOption, anglePerOption);
+                }
+
+                // Draw text
+                float midAngle = (startAngle + i * anglePerOption + startAngle + (i + 1) * anglePerOption) / 2;
+                double rad = (Math.PI / 180) * (startAngle + (i + 0.5f) * anglePerOption);
+                float tx = center.X + (float)(Math.Cos(rad) * (radius * 0.6f));
+                float ty = center.Y + (float)(Math.Sin(rad) * (radius * 0.6f));
+                using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                using (Font font = new Font("Segoe UI", 13, FontStyle.Bold))
+                using (Brush textBrush = new SolidBrush(Color.White))
+                {
+                    e.Graphics.DrawString(options[i], font, textBrush, tx, ty, sf);
+                }
+            }
+
+            // Draw center circle
+            using (Pen p = new Pen(Color.White, 4))
+            {
+                e.Graphics.DrawEllipse(p, center.X - radius, center.Y - radius, radius * 2, radius * 2);
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            int index = HitTest(e.Location);
+            if (index != hoveredIndex)
+            {
+                hoveredIndex = index;
+                Invalidate();
+            }
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            int index = HitTest(e.Location);
+            if (index != -1)
+            {
+                OptionSelected?.Invoke(options[index]);
+                //Close();
+            }
+            else
+            {
+                Close();
+            }
+            base.OnMouseDown(e);
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == Keys.Escape)
+            {
+                Close();
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        // Hit test which slice the mouse is over
+        private int HitTest(Point pt)
+        {
+            Point center = new Point(ClientSize.Width / 2, ClientSize.Height / 2);
+            int radius = Math.Min(ClientSize.Width, ClientSize.Height) / 2 - 10;
+            double dx = pt.X - center.X;
+            double dy = pt.Y - center.Y;
+            double distance = Math.Sqrt(dx * dx + dy * dy);
+            if (distance > radius)
+                return -1;
+            double angle = (Math.Atan2(dy, dx) * 180.0 / Math.PI + 360.0 + 90.0) % 360.0;
+            float anglePerOption = 360f / options.Length;
+            int index = (int)(angle / anglePerOption);
+            if (index < 0 || index >= options.Length)
+                return -1;
+            return index;
+        }
+    }
+}
