@@ -1,0 +1,741 @@
+using Newtonsoft.Json;
+using Ookii.Dialogs.WinForms;
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using System.Windows.Media.Imaging;
+
+namespace Image_Crop
+{
+    public partial class Form1 : Form
+    {
+        BindingList<MyListBoxItem> MyItems { get; } = new BindingList<MyListBoxItem>();
+        Color SelectedColor = Color.LightGreen;
+        List<DrawingRectangle> DrawingRects = new List<DrawingRectangle>();
+        Bitmap rectImage;
+        bool drawBorder = true;
+        bool clearRectangles = true;
+        bool saveRectangles = true;
+        string rectangleName;
+        Dictionary<string, string> FileList = new Dictionary<string, string>();
+        string selectedPath;
+        int x, y;
+        private bool crop = false;
+        private bool isRealTimeCropping = false;
+        private int cropRectWidth = 50; // default width
+        private int cropRectHeight = 50; // default height
+        private Point realTimeCursorPos;
+        private Bitmap realTimeCroppedImage; // New field to hold real-time cropped image
+        bool drawRectangle = false;
+        bool drawCircle = false;
+        Point mousePosition;
+        int countTotalNumberOfRectangles = 0;
+
+        public Form1()
+        {
+            InitializeComponent();
+
+            textBoxLensSize.Text = cropRectWidth.ToString();
+
+            textBoxImageToCrop.Text = Properties.Settings.Default.ImageToCropFolder;
+            textBoxCroppedImagesFolder.Text = Properties.Settings.Default.CroppedImagesFolder;
+
+            selectedPath = textBoxCroppedImagesFolder.Text;
+
+            if (textBoxImageToCrop.Text != "" && File.Exists(textBoxImageToCrop.Text))
+            {
+                Bitmap bmp = new Bitmap(Image.FromFile(textBoxImageToCrop.Text),
+                    pictureBoxImageToCrop.Width, pictureBoxImageToCrop.Height);
+                pictureBoxImageToCrop.Image = bmp;
+            }
+
+            checkBoxDrawBorder.Checked = true;
+            checkBoxClearRectangles.Checked = true;
+            checkBoxSaveRectangles.Checked = true;
+
+            if (selectedPath != "" && selectedPath != null)
+            {
+                if (System.IO.File.Exists(Path.Combine(selectedPath, "rectangles.txt")))
+                {
+                    string g = System.IO.File.ReadAllText(Path.Combine(selectedPath, "rectangles.txt"));
+                    g = g.Remove(0, 32);
+
+                    FileList = JsonConvert.DeserializeObject<Dictionary<string, string>>(g); ;
+
+                    for (int i = 0; i < FileList.LongCount(); i++)
+                    {
+                        MyItems.Add(new MyListBoxItem
+                        {
+                            Message = FileList.Keys.ElementAt(i) + "," + FileList.Values.ElementAt(i),
+                            ItemColor = Color.Green
+                        });
+                    }
+
+                    string[] lines = File.ReadAllLines(Path.Combine(selectedPath, "rectangles.txt"));
+                    foreach (var line in lines)
+                    {
+                        string[] parts = line.Split(',');
+                        if (parts.Length >= 2)
+                        {
+                            Point location = PointsCoordinatesFromLoadedFile(parts[0].Trim());
+                            Size size = RectanglesSizeFromLoadedFile(parts[1].Trim());
+                            DrawingRects.Add(new DrawingRectangle
+                            {
+                                Location = location,
+                                Size = size,
+                                Owner = this,
+                                DrawingcColor = SelectedColor,
+                                PenSize = 3f  // You can set this to any value you like
+                            });
+                        }
+                    }
+                }
+                else
+                {
+                    label2.Text = "0";
+                }
+            }
+            else
+            {
+                label2.Text = "0";
+            }
+
+            if ((selectedPath != "" && selectedPath != null) && textBoxImageToCrop.Text != "")
+            {
+                crop = true;
+            }
+            else
+            {
+                crop = false;
+            }
+
+            if (DrawingRects.Count > 0 && pictureBoxImageToCrop.Image != null)
+            {
+                var lastRect = DrawingRects.Last().Rect; // get the last rectangle
+                rectImage = cropAtRect((Bitmap)pictureBoxImageToCrop.Image, lastRect);
+
+                if (rectImage == null)
+                {
+                    // Log or alert that cropping failed
+                }
+
+                if (rectImage != null && DrawingRects.Count > 0)
+                {
+                    pictureBoxCroppedImages.Invalidate();
+                }
+            } 
+        }
+
+        public class RectangleData
+        {
+            public Point Location { get; set; }
+            public Size Size { get; set; }
+            public Color Color { get; set; }
+        }
+
+        public class DrawingRectangle
+        {
+            public Rectangle Rect => new Rectangle(Location, Size);
+            public System.Drawing.Size Size { get; set; }
+            public Point Location { get; set; }
+            public Control Owner { get; set; }
+            public Point StartPosition { get; set; }
+            public Color DrawingcColor { get; set; } = Color.LightGreen;
+            public float PenSize { get; set; } = 3f;
+        }
+
+        private void Form1_Load(object sender, EventArgs e)
+        {
+
+        }
+
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+
+            listBoxCroppedImages.DisplayMember = nameof(MyListBoxItem.Message);
+            listBoxCroppedImages.DataSource = MyItems;
+            listBoxCroppedImages.DrawMode = DrawMode.OwnerDrawFixed;
+            listBoxCroppedImages.SelectedIndexChanged += (sender, ee) => listBoxCroppedImages.Refresh();
+
+            label2.Text = listBoxCroppedImages.Items.Count.ToString();
+            listBoxCroppedImages.SelectedIndex = listBoxCroppedImages.Items.Count - 1;
+        }
+
+        public MemoryStream ToMemoryStream(Bitmap b)
+        {
+            MemoryStream ms = new MemoryStream();
+            b.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+            return ms;
+        }
+
+        string GetNextName(string baseName, string extension)
+        {
+            int counter = 1;
+            string nextName = baseName + counter + extension;
+            while (System.IO.File.Exists(nextName))
+            {
+                counter++;
+                nextName = baseName + counter + extension;
+            }
+            return nextName;
+        }
+
+        private void DrawShapes(Graphics g)
+        {
+            if (DrawingRects.Count == 0) return;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            foreach (var dr in DrawingRects)
+            {
+                if (dr.Rect.Width > 0 && dr.Rect.Height > 0)
+                {
+                    using (Pen pen = new Pen(dr.DrawingcColor, dr.PenSize))
+                    {
+                        g.DrawRectangle(pen, dr.Rect);
+                    };
+                }
+            }
+        }
+
+        public Bitmap cropAtRect(Bitmap b, Rectangle r)
+        {
+            if (r.Width <= 0 || r.Height <= 0 || r.Right > b.Width || r.Bottom > b.Height)
+                return null;
+
+            Bitmap nb = new Bitmap(r.Width, r.Height);
+            using (Graphics g = Graphics.FromImage(nb))
+            {
+                g.DrawImage(b, new Rectangle(0, 0, r.Width, r.Height), r, GraphicsUnit.Pixel);
+                return nb;
+            }
+        }
+
+        private void checkBoxDrawBorder_CheckedChanged(object sender, EventArgs e)
+        {
+            if (checkBoxDrawBorder.Checked)
+            {
+                drawBorder = true;
+            }
+            else
+            {
+                drawBorder = false;
+            }
+
+            pictureBoxCroppedImages.Invalidate();
+            pictureBoxImageToCrop.Invalidate();
+        }
+
+        private void checkBoxClearRectangles_CheckedChanged(object sender, EventArgs e)
+        {
+            if (checkBoxClearRectangles.Checked)
+            {
+                clearRectangles = true;
+            }
+            else
+            {
+                clearRectangles = false;
+            }
+
+            pictureBoxImageToCrop.Invalidate();
+        }
+
+        private void checkBoxSaveRectangles_CheckedChanged(object sender, EventArgs e)
+        {
+            if (checkBoxSaveRectangles.Checked)
+            {
+                saveRectangles = true;
+            }
+            else
+            {
+                saveRectangles = false;
+            }
+        }
+
+        public class MyListBoxItem
+        {
+            public Color ItemColor { get; set; }
+            public string Message { get; set; }
+        }
+
+        private void pictureBoxImageToCrop_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left || crop == false) return;
+
+            x = 0;
+            y = 0;
+
+            if (pictureBoxImageToCrop.Image != null && selectedPath != null)
+            {
+                if (!isRealTimeCropping)
+                {
+                    if ((x >= 0 && x <= pictureBoxImageToCrop.Image.Size.Width) && (y >= 0 && y <= pictureBoxImageToCrop.Image.Size.Height))
+                    {
+                        DrawingRects.Add(new DrawingRectangle()
+                        {
+                            Location = e.Location,
+                            Size = Size.Empty,
+                            StartPosition = e.Location,
+                            Owner = (Control)sender,
+                            DrawingcColor = SelectedColor
+                        });
+                    }
+                }
+                else
+                {
+                    pictureBoxCroppedImages.Image = null;
+                }
+            }
+        }
+
+        private void pictureBoxImageToCrop_MouseMove(object sender, MouseEventArgs e)
+        {
+            int X = e.X;
+            int Y = e.Y;
+
+            mousePosition = e.Location;
+            pictureBoxImageToCrop.Invalidate(); // Forces a repaint
+
+            if (!isRealTimeCropping)
+            {
+                if (e.Button != MouseButtons.Left || crop == false) return;
+            }
+
+            if (e.Button == MouseButtons.Left)
+            {
+                this.Cursor = Cursors.Cross;
+            }
+            else
+            {
+                this.Cursor = Cursors.Default;
+            }
+
+            if (!isRealTimeCropping)
+            {
+                if ((X >= 0 && X <= pictureBoxImageToCrop.Width) && (Y >= 0 && Y <= pictureBoxImageToCrop.Height))
+                {
+                    if (pictureBoxImageToCrop.Image != null && selectedPath != null && DrawingRects.Count > 0)
+                    {
+                        if ((x >= 0 && x <= pictureBoxImageToCrop.Image.Size.Width) && (y >= 0 && y <= pictureBoxImageToCrop.Image.Size.Height))
+                        {
+                            x = e.X;
+                            y = e.Y;
+
+                            var dr = DrawingRects[DrawingRects.Count - 1];
+                            if (e.Y < dr.StartPosition.Y) { dr.Location = new Point(dr.Rect.Location.X, e.Y); }
+                            if (e.X < dr.StartPosition.X) { dr.Location = new Point(e.X, dr.Rect.Location.Y); }
+
+                            dr.Size = new Size(Math.Abs(dr.StartPosition.X - e.X), Math.Abs(dr.StartPosition.Y - e.Y));
+                            pictureBoxImageToCrop.Invalidate();
+                        }
+                    }
+                }
+            }
+
+            if (isRealTimeCropping)
+            {
+                if ((X >= 0 && X <= pictureBoxImageToCrop.Width) && (Y >= 0 && Y <= pictureBoxImageToCrop.Height))
+                {
+                    this.Cursor = Cursors.Cross;
+                    realTimeCursorPos = new Point(e.X - cropRectWidth / 2, e.Y - cropRectHeight / 2);
+                    Rectangle cropRect = new Rectangle(realTimeCursorPos.X, realTimeCursorPos.Y, cropRectWidth, cropRectHeight);
+                    realTimeCroppedImage = cropAtRect((Bitmap)pictureBoxImageToCrop.Image, cropRect); // Set realTimeCroppedImage instead of pictureBoxCroppedImages.Image
+                    pictureBoxCroppedImages.Invalidate(); // refresh the whole picture box
+                }
+            }
+            else
+            {
+                this.Cursor = Cursors.Default;
+            }
+        }
+
+        private void pictureBoxImageToCrop_MouseUp(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left || crop == false) return;
+
+            if (!isRealTimeCropping && DrawingRects.Count > 0 && pictureBoxImageToCrop.Image != null && selectedPath != "")
+            {
+                var dr = DrawingRects.Last();
+                if (dr.Rect.Width > 0 && dr.Rect.Height > 0)
+                {
+                    rectImage = cropAtRect((Bitmap)pictureBoxImageToCrop.Image, dr.Rect);
+
+                    if (saveRectangles)
+                    {
+                        countTotalNumberOfRectangles++;
+                        rectangleName = GetNextName(Path.Combine(selectedPath, "Rectangle"), ".bmp");
+                        FileList.Add($"{dr.Location}, {dr.Size}", rectangleName);
+
+                        string json = JsonConvert.SerializeObject(
+                            FileList,
+                            Formatting.Indented
+                        );
+                        using (StreamWriter sw = new StreamWriter(Path.Combine(selectedPath, "rectangles.txt"), false))
+                        {
+                            sw.WriteLine("Total number of rectangles: " + countTotalNumberOfRectangles + Environment.NewLine);
+                            sw.Write(json);
+                            sw.Close();
+                        }
+
+                        rectImage.Save(rectangleName);
+
+                        var newKey = $"{dr.Location}, {dr.Size}";
+                        var newItem = new MyListBoxItem
+                        {
+                            Message = newKey + "," + FileList[newKey],
+                            ItemColor = Color.Green
+                        };
+                        MyItems.Add(newItem);
+                        listBoxCroppedImages.SelectedIndex = MyItems.Count - 1;
+                        label2.Text = listBoxCroppedImages.Items.Count.ToString();
+                    }
+                    else
+                    {
+                        var stream = ToMemoryStream(rectImage);
+                        var image = System.Drawing.Image.FromStream(stream);
+                        pictureBoxCroppedImages.Image = image;
+                    }
+
+                    pictureBoxImageToCrop.Focus();
+
+                    if (pictureBoxCroppedImages.Image != null)
+                    {
+                        Graphics g = Graphics.FromImage(this.pictureBoxCroppedImages.Image);
+                        g.Clear(this.pictureBoxCroppedImages.BackColor);
+                    }
+                }
+            }
+        }
+
+        private void pictureBoxImageToCrop_Paint(object sender, PaintEventArgs e)
+        {
+            if (drawBorder)
+            {
+                ControlPaint.DrawBorder(e.Graphics, pictureBoxImageToCrop.ClientRectangle, Color.Red, ButtonBorderStyle.Solid);
+            }
+
+            if (pictureBoxImageToCrop.Image != null && selectedPath != null && DrawingRects.Count > 0)
+            {
+                DrawShapes(e.Graphics);
+            }
+
+            if (isRealTimeCropping)
+            {
+                Graphics g = e.Graphics;
+                int width = cropRectWidth;  // Size width
+                int height = cropRectHeight; // Size height
+                float penWidth = 3.0f; // Pen thickness. Modify this value as desired.
+
+                using (Pen customPen = new Pen(Color.Red, penWidth))
+                {
+                    Rectangle realtimeRect = new Rectangle(mousePosition.X - width / 2, mousePosition.Y - height / 2, width, height);
+
+                    if (drawRectangle)
+                    {
+                        // Draw a rectangle at the mouse position
+                        g.DrawRectangle(customPen, realtimeRect);
+                    }
+                    else if (drawCircle)
+                    {
+                        // Draw a circle at the mouse position
+                        g.DrawEllipse(customPen, realtimeRect);
+                    }
+                }
+            }
+        }
+
+        private void btnCroppedImagesFolder_Click(object sender, EventArgs e)
+        {
+            VistaFolderBrowserDialog dialog = new VistaFolderBrowserDialog();
+
+            if (dialog.ShowDialog() == DialogResult.OK)
+            {
+                textBoxCroppedImagesFolder.Text = dialog.SelectedPath;
+                selectedPath = dialog.SelectedPath;
+
+                Properties.Settings.Default.CroppedImagesFolder = selectedPath;
+                Properties.Settings.Default.Save();
+
+                if (textBoxImageToCrop.Text != "" && textBoxCroppedImagesFolder.Text != "")
+                {
+                    crop = true;
+                }
+            }
+        }
+
+        private void listBoxCroppedImages_DrawItem(object sender, DrawItemEventArgs e)
+        {
+            if ((e.Index == -1) || (e.Index >= MyItems.Count))
+            {
+                e.DrawBackground();
+            }
+            else
+            {
+                var myItem = MyItems[e.Index];
+                if (listBoxCroppedImages.SelectedItems.Contains(myItem))
+                {
+                    using (var backgroundBrush = new SolidBrush(myItem.ItemColor))
+                    {
+                        e.Graphics.FillRectangle(backgroundBrush, e.Bounds);
+                    }
+
+                    using (var textBrush = new SolidBrush(Color.White))
+                    {
+                        e.Graphics.DrawString(myItem.Message, listBoxCroppedImages.Font, textBrush, e.Bounds);
+                    }
+                }
+                else
+                {
+                    using (var backgroundBrush = new SolidBrush(SystemColors.Window))
+                    {
+                        e.Graphics.FillRectangle(backgroundBrush, e.Bounds);
+                    }
+                    using (var textBrush = new SolidBrush(myItem.ItemColor))
+                    {
+                        e.Graphics.DrawString(myItem.Message, listBoxCroppedImages.Font, textBrush, e.Bounds);
+                    }
+                }
+            }
+        }
+
+        private void listBoxCroppedImages_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (!isRealTimeCropping)
+            {
+                var si = ((ListBox)sender).SelectedIndex;
+                if (si >= 0 && si < FileList.Count)
+                {
+                    var selectedKey = FileList.Keys.ElementAt(si); // Here we fetch the key at index si
+
+                    Match match = Regex.Match(selectedKey, @"X=(\d+),Y=(\d+)\)\s+\(Width=(\d+),\s+Height=(\d+)\)");
+                    if (match.Success)
+                    {
+                        int x = int.Parse(match.Groups[1].Value);
+                        int y = int.Parse(match.Groups[2].Value);
+
+                        if (!string.IsNullOrEmpty(selectedKey) && FileList.ContainsKey(selectedKey))
+                        {
+                            var filePath = FileList[selectedKey];
+                            if (File.Exists(filePath))
+                            {
+                                pictureBoxCroppedImages.Image = System.Drawing.Image.FromFile(filePath);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private void btnImageToCrop_Click(object sender, EventArgs e)
+        {
+            VistaOpenFileDialog dialog = new VistaOpenFileDialog();
+            {
+                dialog.Filter = "Images (*.jpg, *.bmp, *.gif)|*.jpg;*.bmp;*.gif";
+            };
+
+            if (dialog.ShowDialog() == DialogResult.OK)
+            {
+                textBoxImageToCrop.Text = dialog.FileName;
+
+                Properties.Settings.Default.ImageToCropFolder = dialog.FileName;
+                Properties.Settings.Default.Save();
+
+                Bitmap bmp = new Bitmap(Image.FromFile(dialog.FileName),
+                    pictureBoxImageToCrop.Width, pictureBoxImageToCrop.Height);
+                pictureBoxImageToCrop.Image = bmp;
+
+                if (textBoxImageToCrop.Text != "" && textBoxCroppedImagesFolder.Text != "")
+                {
+                    crop = true;
+                }
+            }
+        }
+
+        private void listBoxCroppedImages_MeasureItem(object sender, MeasureItemEventArgs e)
+        {
+            if (MyItems[e.Index] != null)
+            {
+                // Calculate the height of the item based on its contents
+                SizeF size = e.Graphics.MeasureString(MyItems[e.Index].Message, listBoxCroppedImages.Font, listBoxCroppedImages.Width);
+                e.ItemHeight = (int)(size.Height + 2);
+            }
+        }
+
+        private void checkBoxRealTimeCrop_CheckedChanged(object sender, EventArgs e)
+        {
+            isRealTimeCropping = checkBoxRealTimeCrop.Checked;
+            if (isRealTimeCropping)
+            {
+                this.Cursor = Cursors.Default;
+                radioButtonCircular.Checked = true;
+                textBoxLensSize.Enabled = true;
+            }
+            else
+            {
+                radioButtonCircular.Checked = false;
+                radioButtonRectangular.Checked = false;
+                textBoxLensSize.Enabled = false;
+            }
+        }
+
+        private void radioButtonCircular_CheckedChanged(object sender, EventArgs e)
+        {
+            if (radioButtonCircular.Checked)
+            {
+                drawRectangle = false;
+                drawCircle = true;
+                //Cursor.Hide();
+            }
+            else
+            {
+                Cursor.Show();
+            }
+        }
+
+        private void radioButtonRectangular_CheckedChanged(object sender, EventArgs e)
+        {
+            if (radioButtonRectangular.Checked)
+            {
+                drawRectangle = true;
+                drawCircle = false;
+                //Cursor.Hide();
+            }
+            else
+            {
+                Cursor.Show();
+            }
+        }
+
+        private void Form1_Paint(object sender, PaintEventArgs e)
+        {
+
+        }
+
+        private void pictureBoxImageToCrop_MouseLeave(object sender, EventArgs e)
+        {
+            drawCircle = false;
+            drawRectangle = false;
+            this.Cursor = Cursors.Default;
+            pictureBoxImageToCrop.Invalidate();
+        }
+
+        private void pictureBoxImageToCrop_MouseEnter(object sender, EventArgs e)
+        {
+            if (isRealTimeCropping)
+            {
+                pictureBoxCroppedImages.Image = null;
+            }
+
+            if (radioButtonCircular.Checked)
+            {
+                drawRectangle = false;
+                drawCircle = true;
+                //Cursor.Hide();
+            }
+            else if (radioButtonRectangular.Checked)
+            {
+                drawRectangle = true;
+                drawCircle = false;
+            }
+
+            pictureBoxImageToCrop.Invalidate();
+        }
+
+        private void textBoxLensSize_TextChanged(object sender, EventArgs e)
+        {
+            int newSize;
+            if (int.TryParse(textBoxLensSize.Text, out newSize))
+            {
+                if (newSize > 29)
+                {
+                    cropRectWidth = newSize;
+                    cropRectHeight = newSize;
+                    pictureBoxImageToCrop.Invalidate();
+                    pictureBoxCroppedImages.Invalidate();
+                }
+            }
+        }
+
+        private void pictureBoxCroppedImages_Paint(object sender, PaintEventArgs e)
+        {
+            if (drawBorder)
+            {
+                ControlPaint.DrawBorder(e.Graphics, pictureBoxCroppedImages.ClientRectangle, Color.Red, ButtonBorderStyle.Solid);
+            }
+
+            if (!isRealTimeCropping)
+            {
+                if (rectImage != null && DrawingRects.Count > 0)
+                {
+                    var dr = DrawingRects.Last();
+                    e.Graphics.DrawImage(rectImage, dr.Rect);
+
+                    if (clearRectangles)
+                    {
+                        DrawingRects.Clear();
+                        pictureBoxImageToCrop.Invalidate();
+                    }
+                }
+            }
+
+            if (isRealTimeCropping && realTimeCroppedImage != null)
+            {
+                // Handle cropping shape based on radio button selection
+                if (radioButtonCircular.Checked)
+                {
+                    using (GraphicsPath path = new GraphicsPath())
+                    {
+                        path.AddEllipse(realTimeCursorPos.X, realTimeCursorPos.Y, realTimeCroppedImage.Width, realTimeCroppedImage.Height);
+                        e.Graphics.SetClip(path);
+                        e.Graphics.DrawImage(realTimeCroppedImage, realTimeCursorPos);
+                    }
+                }
+
+                if (radioButtonRectangular.Checked)
+                {
+                    using (GraphicsPath path = new GraphicsPath())
+                    {
+                        path.AddRectangle(new Rectangle(realTimeCursorPos.X, realTimeCursorPos.Y, realTimeCroppedImage.Width, realTimeCroppedImage.Height));
+                        e.Graphics.SetClip(path);
+                        e.Graphics.DrawImage(realTimeCroppedImage, realTimeCursorPos);
+                    }
+                }
+            }
+        }
+
+        private Point PointsCoordinatesFromLoadedFile(string str)
+        {
+            MatchCollection matches = Regex.Matches(str, @"\d+");
+            if (matches.Count >= 2)
+            {
+                int x = Convert.ToInt32(matches[0].Value);
+                int y = Convert.ToInt32(matches[1].Value);
+                return new Point(x, y);
+            }
+            return new Point();  // Return a default Point if parsing fails
+        }
+
+        private Size RectanglesSizeFromLoadedFile(string str)
+        {
+            MatchCollection matches = Regex.Matches(str, @"\d+");
+            if (matches.Count >= 2)
+            {
+                int width = Convert.ToInt32(matches[0].Value);
+                int height = Convert.ToInt32(matches[1].Value);
+                return new Size(width, height);
+            }
+            return new Size();  // Return a default Size if parsing fails
+        }
+    }
+}
